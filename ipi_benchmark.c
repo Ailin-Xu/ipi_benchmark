@@ -12,11 +12,13 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
  * General Public License for more details.
  */
-
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/ktime.h>
+#include <linux/random.h>
+#include <linux/topology.h>
+#include <asm/topology.h>
 
 #define NTIMES 100000
 
@@ -25,8 +27,18 @@
 #define POKE_SELF	2
 #define POKE_ALL	3
 #define POKE_ALL_LOCK	4
+#define THIS_CPU_MODULE	5
+#define THIS_SOCKET 6
+#define ANOTHER_SOCKET	7
 
-static void __init handle_ipi_spinlock(void *t)
+static inline unsigned int my_random(int x)
+{
+	unsigned int tmp;
+	get_random_bytes(&tmp, sizeof(int));
+	return tmp % x;
+}
+
+static void handle_ipi_spinlock(void *t)
 {
 	spinlock_t *lock = (spinlock_t *) t;
 
@@ -34,7 +46,7 @@ static void __init handle_ipi_spinlock(void *t)
 	spin_unlock(lock);
 }
 
-static void __init handle_ipi(void *t)
+static void handle_ipi(void *t)
 {
 	ktime_t *time = (ktime_t *) t;
 
@@ -42,12 +54,13 @@ static void __init handle_ipi(void *t)
 		*time = ktime_get() - *time;
 }
 
-static ktime_t __init send_ipi(int flags)
+static ktime_t send_ipi(int flags)
 {
 	ktime_t time = 0;
 	DEFINE_SPINLOCK(lock);
-	unsigned int cpu = get_cpu();
-
+	unsigned int cpu = get_cpu(), target_cpu;
+	struct cpumask target_mask;
+	target_cpu = cpu;
 	switch (flags) {
 	case DRY_RUN:
 		/* Do everything except actually sending IPI. */
@@ -61,15 +74,40 @@ static ktime_t __init send_ipi(int flags)
 				handle_ipi_spinlock, &lock, 1);
 		break;
 	case POKE_ANY:
-		cpu = cpumask_any_but(cpu_online_mask, cpu);
-		if (cpu >= nr_cpu_ids) {
+		target_cpu = cpumask_any_but(cpu_online_mask, cpu);
+		if (target_cpu >= nr_cpu_ids) {
 			time = -ENOENT;
 			break;
 		}
 		/* Fall thru */
+		time = ktime_get();
+		smp_call_function_single(target_cpu, handle_ipi, &time, 1);
+		break;
 	case POKE_SELF:
 		time = ktime_get();
 		smp_call_function_single(cpu, handle_ipi, &time, 1);
+		break;
+	case THIS_CPU_MODULE:
+		// topology_cluster_cpumask returns cpus with shared L2 cache.
+		// On SRF, this means cpus within one module.
+		// On HT enabled EMR/GNR, this means logical cpus from same physical core,
+		// same as topology_core_cpumask.
+
+		// target_cpu = cpumask_any_but(topology_core_cpumask(cpu) ,cpu);
+		target_cpu = cpumask_any_but(topology_cluster_cpumask(cpu) ,cpu);
+		time = ktime_get();
+		smp_call_function_single(target_cpu, handle_ipi, &time, 1);
+		break;	
+	case THIS_SOCKET:
+		target_cpu = cpumask_any_but(topology_die_cpumask(cpu) ,cpu);
+		time = ktime_get();
+		smp_call_function_single(target_cpu, handle_ipi, &time, 1);			
+		break;	
+	case ANOTHER_SOCKET:
+		cpumask_xor(&target_mask, cpu_online_mask, topology_die_cpumask(cpu));
+		target_cpu = cpumask_any_but(&target_mask, cpu);
+		time = ktime_get();
+		smp_call_function_single(target_cpu, handle_ipi, &time, 1);
 		break;
 	default:
 		time = -EINVAL;
@@ -95,7 +133,7 @@ static int __init __bench_ipi(unsigned long i, ktime_t *time, int flags)
 	return 0;
 }
 
-static int __init bench_ipi(unsigned long times, int flags,
+static int bench_ipi(unsigned long times, int flags,
 				ktime_t *ipi, ktime_t *total)
 {
 	int ret;
@@ -115,12 +153,12 @@ static int __init init_bench_ipi(void)
 	ktime_t ipi, total;
 	int ret;
 
-	ret = bench_ipi(NTIMES, DRY_RUN, &ipi, &total);
-	if (ret)
-		pr_err("Dry-run FAILED: %d\n", ret);
-	else
-		pr_err("Dry-run:        %18llu, %18llu ns\n", ipi, total);
-
+//	ret = bench_ipi(NTIMES, DRY_RUN, &ipi, &total);
+//	if (ret)
+//		pr_err("Dry-run FAILED: %d\n", ret);
+//	else
+//		pr_err("Dry-run:        %18llu, %18llu ns\n", ipi, total);
+//
 	ret = bench_ipi(NTIMES, POKE_SELF, &ipi, &total);
 	if (ret)
 		pr_err("Self-IPI FAILED: %d\n", ret);
@@ -129,21 +167,41 @@ static int __init init_bench_ipi(void)
 
 	ret = bench_ipi(NTIMES, POKE_ANY, &ipi, &total);
 	if (ret)
-		pr_err("Normal IPI FAILED: %d\n", ret);
+		pr_err("Normal-IPI FAILED: %d\n", ret);
 	else
-		pr_err("Normal IPI:     %18llu, %18llu ns\n", ipi, total);
+		pr_err("Normal-IPI:     %18llu, %18llu ns\n", ipi, total);
 
-	ret = bench_ipi(NTIMES, POKE_ALL, &ipi, &total);
+	ret = bench_ipi(NTIMES, THIS_CPU_MODULE, &ipi, &total);
 	if (ret)
-		pr_err("Broadcast IPI FAILED: %d\n", ret);
+		pr_err("THIS_MODULE-IPI FAILED: %d\n", ret);
 	else
-		pr_err("Broadcast IPI:  %18llu, %18llu ns\n", ipi, total);
+		pr_err("THIS_MODULE-IPI:     %18llu, %18llu ns\n", ipi, total);
 
-	ret = bench_ipi(NTIMES, POKE_ALL_LOCK, &ipi, &total);
+	ret = bench_ipi(NTIMES, THIS_SOCKET, &ipi, &total);
 	if (ret)
-		pr_err("Broadcast lock FAILED: %d\n", ret);
+		pr_err("THIS_SOCKET-IPI FAILED: %d\n", ret);
 	else
-		pr_err("Broadcast lock: %18llu, %18llu ns\n", ipi, total);
+		pr_err("THIS_SOCKET-IPI:     %18llu, %18llu ns\n", ipi, total);
+
+	ret = bench_ipi(NTIMES, ANOTHER_SOCKET, &ipi, &total);
+	if (ret)
+		pr_err("ANOTHER_SOCKET-IPI FAILED: %d\n", ret);
+	else
+		pr_err("ANOTHER_SOCKET-IPI:     %18llu, %18llu ns\n", ipi, total);
+
+
+
+//	ret = bench_ipi(NTIMES, POKE_ALL, &ipi, &total);
+//	if (ret)
+//		pr_err("Broadcast-IPI FAILED: %d\n", ret);
+//	else
+//		pr_err("Broadcast-IPI:  %18llu, %18llu ns\n", ipi, total);
+//
+//	ret = bench_ipi(NTIMES, POKE_ALL_LOCK, &ipi, &total);
+//	if (ret)
+//		pr_err("Broadcast-lock FAILED: %d\n", ret);
+//	else
+//		pr_err("Broadcast-lock: %18llu, %18llu ns\n", ipi, total);
 
 	/* Return error to avoid annoying rmmod. */
 	return -EINVAL;

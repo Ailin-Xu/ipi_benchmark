@@ -17,38 +17,40 @@ BEGIN {
     COUNT=0;
 }
 
-/Dry-run:/{
-    SUM[0]+=$4;
-    TOTAL[0]+=$5;
+
+/Normal-IPI:/{
+    SUM[0]+=$2;
+    TOTAL[0]+=$4;
     COUNT++;
 }
 
+/THIS_MODULE-IPI:/{
+    SUM[1]+=$2;
+    TOTAL[1]+=$4;
+}
+
+/THIS_SOCKET-IPI:/{
+    SUM[2]+=$2;
+    TOTAL[2]+=$4;
+}
+
+/ANOTHER_SOCKET-IPI:/{
+    SUM[3]+=$2;
+    TOTAL[3]+=$4;
+}
+
 /Self-IPI:/{
-    SUM[1]+=$4;
-    TOTAL[1]+=$5;
-}
-
-/Normal IPI:/{
-    SUM[2]+=$5;
-    TOTAL[2]+=$6;
-}
-
-/Broadcast IPI:/{
-    SUM[3]+=$5;
-    TOTAL[3]+=$6;
-}
-
-/Broadcast lock:/{
-    SUM[4]+=$5;
-    TOTAL[4]+=$6;
+    SUM[4]+=$2;
+    TOTAL[4]+=$4;
 }
 
 END {
     printf("count = %d\n", COUNT);
-    fmt="%s\t%12.2f\t%13.2f\n";
-    printf(fmt, "Dry-run\t", SUM[0]/COUNT, TOTAL[0]/COUNT);
-    printf(fmt, "Self-IPI", SUM[1]/COUNT, TOTAL[1]/COUNT);
-    printf(fmt, "Normal IPI", SUM[2]/COUNT, TOTAL[2]/COUNT);
-    printf(fmt, "Broadcast IPI", SUM[3]/COUNT, TOTAL[3]/COUNT);
-    printf(fmt, "Broadcast lock", SUM[4]/COUNT, TOTAL[4]/COUNT);
+    fmt="%s\t%12.0f\t\n";
+    printf(fmt, "Self\t\t", SUM[4]/COUNT);
+    printf(fmt, "Normal\t\t", SUM[0]/COUNT);
+    printf(fmt, "THIS_MODULE IPI\t", SUM[1]/COUNT);
+    printf(fmt, "THIS_SOCKET IPI\t", SUM[2]/COUNT);
+    printf(fmt, "ANOTHER_SOCKET IPI", SUM[3]/COUNT);
 }
+
